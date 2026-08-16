@@ -21,7 +21,8 @@ name: Build AppImage
 #    REMOVE_PDB=1                    # delete .pdb / .dbg / .xml files from .NET publish dir (~10 MB savings)
 #    SKIP_FFPLAY=1                   # don't bundle ffplay (Parabolic only needs ffmpeg + ffprobe, ~10 MB savings)
 #    SHRINK_ICU=0                    # off by default — removing ICU breaks non-English locale formatting
-#    FFMPEG_SOURCE=johnvansickle     # use stable ffmpeg 7.0 (~40 MB) instead of BtbN master-latest (~140 MB)
+#    FFMPEG_SOURCE=btbn               # default — BtbN master-latest (~140 MB, GitHub Releases, reliable)
+#    FFMPEG_SOURCE=johnvansickle     # smaller (~40 MB) BUT Cloudflare-protected, may fail; auto-falls-back to BtbN
 #
 #  Expected output size with all defaults: ~171 MB (deno bundled by default)
 #
@@ -45,13 +46,13 @@ on:
         default: true
         type: boolean
       ffmpeg_source:
-        description: "ffmpeg source — johnvansickle (~40 MB, stable) or btbn (~140 MB, dev build)"
+        description: "ffmpeg source — btbn (~140 MB, GitHub Releases, reliable — DEFAULT) or johnvansickle (~40 MB, but Cloudflare-protected, auto-falls-back to btbn on failure)"
         required: false
-        default: "johnvansickle"
+        default: "btbn"
         type: choice
         options:
-          - johnvansickle
           - btbn
+          - johnvansickle
   push:
     branches:
       - main
@@ -104,9 +105,9 @@ env:
   REMOVE_PDB: "1"
   SKIP_FFPLAY: "1"
   SHRINK_ICU: "0"
-  # ffmpeg source — "johnvansickle" (default, ~40 MB total, stable release)
-  # or "btbn" (~140 MB, master-latest dev build with extra filters).
-  FFMPEG_SOURCE: ${{ inputs.ffmpeg_source || 'johnvansickle' }}
+  # ffmpeg source — "btbn" (DEFAULT, GitHub Releases, ~140 MB, reliable)
+  # or "johnvansickle" (~40 MB, but Cloudflare-protected — auto-falls-back to btbn if it fails)
+  FFMPEG_SOURCE: ${{ inputs.ffmpeg_source || 'btbn' }}
   DOTNET_CLI_TELEMETRY_OPTOUT: "1"
   DOTNET_NOLOGO: "1"
   DOTNET_SKIP_FIRST_TIME_EXPERIENCE: "1"
@@ -288,7 +289,7 @@ jobs:
           echo "  ARCH:           $ARCH"
           echo "  DOTNET_RID:     $DOTNET_RID"
           echo "  PARABOLIC_REF:  $PARABOLIC_REF"
-          echo "  FFMPEG_SOURCE:  $FFMPEG_SOURCE  (johnvansickle = ~40 MB, btbn = ~140 MB)"
+          echo "  FFMPEG_SOURCE:  $FFMPEG_SOURCE  (btbn = ~140 MB, reliable; johnvansickle = ~40 MB but Cloudflare-protected)"
           echo "  BUNDLE_DENO:    $BUNDLE_DENO  (1 = bundle deno; yt-dlp requires it for JS extractors)"
           echo "  STRIP_BINARIES: $STRIP_BINARIES"
           echo "  REMOVE_PDB:     $REMOVE_PDB"
@@ -405,7 +406,7 @@ jobs:
             **SHA256 checksum** — see the attached `.sha256` file.
 
             ### Size-reduction knobs used
-            - `FFMPEG_SOURCE=${{ env.FFMPEG_SOURCE }}` (johnvansickle = ~40 MB, btbn = ~140 MB)
+            - `FFMPEG_SOURCE=${{ env.FFMPEG_SOURCE }}` (btbn = ~140 MB, reliable; johnvansickle = ~40 MB but Cloudflare-protected)
             - `BUNDLE_DENO=${{ env.BUNDLE_DENO }}` (1 = deno bundled — **required by yt-dlp** for JS-based extractors)
             - `STRIP_BINARIES=${{ env.STRIP_BINARIES }}` (1 = strip ELF binaries)
             - `REMOVE_PDB=${{ env.REMOVE_PDB }}` (1 = remove .pdb/.dbg/.xml debug files)
