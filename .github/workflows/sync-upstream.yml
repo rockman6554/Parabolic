@@ -1,0 +1,134 @@
+name: Sync upstream
+
+# =============================================================================
+#  Sync upstream workflow — pulls nickvisionapps/parabolic:main into your fork
+# =============================================================================
+#  Runs daily at 06:00 UTC and on manual dispatch. If upstream has new commits,
+#  this workflow merges them into your fork's main branch and pushes.
+#
+#  The push then triggers the AppImage build workflow (via its `on: push: main`
+#  trigger), so a fresh AppImage is automatically rebuilt whenever Parabolic
+#  upstream releases a new version.
+#
+#  Why this is safe:
+#    - The fork NEVER modifies Parabolic source files — it only ADDS two
+#      folders (packaging/appimage/ and .github/workflows/) on top of upstream.
+#    - Therefore, merges are always conflict-free (git 3-way merge with no
+#      overlapping changes).
+#    - If upstream has no new commits since the last sync, the merge is a
+#      no-op and no push happens (so no spurious AppImage rebuild).
+#
+#  To disable auto-sync:
+#    - Comment out the `on: schedule:` block below, OR
+#    - Delete this file from your fork
+# =============================================================================
+
+on:
+  schedule:
+    # Daily at 06:00 UTC — pick any off-peak hour
+    - cron: '0 6 * * *'
+  workflow_dispatch: {}   # manual "Run workflow" button in the Actions tab
+
+permissions:
+  contents: write   # needed to push the merged commits back to your fork
+  actions: write    # needed to trigger the AppImage build via the push event
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false   # don't interrupt a sync that's already running
+
+jobs:
+  sync:
+    name: Merge upstream/main into origin/main
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork (full history for merge)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0           # full history — needed for `git merge`
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git identity
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream remote
+        run: |
+          git remote add upstream https://github.com/nickvisionapps/parabolic.git
+          git fetch upstream --tags --no-recurse-submodules
+
+      - name: Show pre-sync state
+        run: |
+          echo "=== Current fork HEAD ==="
+          git log -1 --oneline
+          echo ""
+          echo "=== Upstream HEAD ==="
+          git log -1 --oneline upstream/main
+          echo ""
+          echo "=== Commits on upstream/main not yet in origin/main ==="
+          git log --oneline origin/main..upstream/main || echo "(none — already up to date)"
+
+      - name: Check if sync is needed
+        id: check
+        run: |
+          if git merge-base --is-ancestor upstream/main origin/main; then
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+            echo "==> Fork is already up to date with upstream. No sync needed."
+          else
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+            echo "==> Upstream has new commits. Sync needed."
+          fi
+
+      - name: Merge upstream/main into origin/main
+        if: steps.check.outputs.needed == 'true'
+        run: |
+          # Use --no-edit so the merge commit message is the default
+          # (no editor interaction). Use --commit to make sure the merge is
+          # committed (not left in the index).
+          #
+          # If a conflict ever occurs (shouldn't, but just in case), fail loudly
+          # so we don't push a half-merged state. The conflict would mean
+          # upstream restructured something our fork also touches — open an
+          # issue and resolve manually.
+          git merge upstream/main --no-edit --commit || {
+            echo "::error::Merge conflict! This shouldn't happen — the fork should only ADD files, not modify upstream files."
+            echo "::error::Inspect the conflict with 'git diff --name-only --diff-filter=U' and resolve manually."
+            git diff --name-only --diff-filter=U
+            exit 1
+          }
+
+      - name: Push merged commits to origin/main
+        if: steps.check.outputs.needed == 'true'
+        run: |
+          git push origin main
+          echo ""
+          echo "==> Pushed. The AppImage build workflow should fire automatically via its 'on: push: main' trigger."
+
+      - name: Show post-sync state
+        if: steps.check.outputs.needed == 'true'
+        run: |
+          echo "=== New fork HEAD ==="
+          git log -5 --oneline
+
+      - name: Create issue on failure
+        if: failure()
+        uses: imjohnbo/issue-bot@v3
+        with:
+          labels: "sync-failed"
+          title: "⚠️ Sync upstream workflow failed"
+          body: |
+            The daily sync from `nickvisionapps/parabolic:main` failed.
+
+            **Inspect the run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+            Most likely cause: a merge conflict (the fork is supposed to be conflict-free since it only adds files).
+
+            To resolve:
+            1. Clone your fork locally
+            2. `git fetch upstream && git merge upstream/main`
+            3. Resolve the conflict (likely the upstream changed a path our build script references)
+            4. Update `packaging/appimage/build-appimage.sh` if needed
+            5. Commit + push
+
+          assignees: ${{ github.repository_owner }}
