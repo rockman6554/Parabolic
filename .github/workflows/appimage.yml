@@ -109,14 +109,47 @@ jobs:
     runs-on: ubuntu-22.04  # glibc 2.35 — maximises host compatibility
     steps:
       - name: Checkout fork
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 1
 
       - name: Set up build dependencies (apt)
+        # apt-get can occasionally fail with exit code 100 due to:
+        #   - Transient mirror failures (403/404 fetching Packages.gz)
+        #   - Hash sum mismatches when Ubuntu archive mirrors are mid-sync
+        #   - Lock file contention with the runner's own background services
+        # We retry up to 3 times with `Acquire::Retries=5` and longer timeouts
+        # to ride through transient issues.
         run: |
-          sudo apt-get update -y
+          set -e
+          # Retry the update + install up to 3 times
+          for attempt in 1 2 3; do
+            echo ""
+            echo "=== apt-get update attempt $attempt/3 ==="
+            sudo apt-get update -y \
+              -o Acquire::Retries=5 \
+              -o Acquire::http::Timeout=30 \
+              -o Acquire::https::Timeout=30 \
+              -o Acquire::ftp::Timeout=30 && break
+            if [ "$attempt" = "3" ]; then
+              echo "::error::apt-get update failed after 3 attempts. Possible causes:"
+              echo "::error::  - Transient Ubuntu archive mirror outage (retry later)"
+              echo "::error::  - Network issue on the GitHub runner"
+              echo "::error::  - Hash sum mismatch (Ubuntu archive mid-sync)"
+              echo "::error::Check https://status.github.com and https://launchpad.net/ubuntu/+archivemirrors for known issues."
+              exit 100
+            fi
+            echo "apt-get update failed on attempt $attempt. Sleeping 15s before retry..."
+            sleep 15
+          done
+          echo ""
+          echo "=== apt-get install (with retries) ==="
           sudo apt-get install -y \
+            -o Acquire::Retries=5 \
+            -o Acquire::http::Timeout=30 \
+            -o Acquire::https::Timeout=30 \
+            -o Dpkg::Options::="--force-confdef" \
+            -o Dpkg::Options::="--force-confold" \
             build-essential \
             autoconf automake autotools-dev libtool pkg-config \
             meson ninja-build \
