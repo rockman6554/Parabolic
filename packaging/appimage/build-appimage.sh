@@ -187,12 +187,17 @@ if [[ "$SKIP_DOWNLOAD" != "1" ]]; then
 
     # --- ffmpeg static build ---------------------------------------------------
     # Two sources, controlled by FFMPEG_SOURCE env var:
-    #   - "johnvansickle" (default):  ffmpeg-release-<arch>-static.tar.xz
-    #     Size: ~40 MB (ffmpeg + ffprobe + ffplay). Stable release. Has ALL codecs.
-    #   - "btbn":  ffmpeg-master-latest-<arch>-gpl.tar.xz
+    #   - "btbn" (DEFAULT):  ffmpeg-master-latest-<arch>-gpl.tar.xz
     #     Size: ~140 MB (ffmpeg alone). Bleeding-edge dev build. Has ALL codecs + extra filters.
-    # The johnvansickle build is ~100 MB smaller and is what we default to.
-    FFMPEG_SOURCE="${FFMPEG_SOURCE:-johnvansickle}"
+    #     Hosted on GitHub Releases — reliable, no rate limits, no Cloudflare.
+    #   - "johnvansickle":  ffmpeg-release-<arch>-static.tar.xz
+    #     Size: ~40 MB (ffmpeg + ffprobe + ffplay). Stable release. Smaller.
+    #     BUT johnvansickle.com is behind Cloudflare, which serves a "Just a moment..."
+    #     JS challenge HTML page (7 KB) to non-browser clients under load — and curl
+    #     can't execute the JS, so the download silently gets an HTML page instead of
+    #     the actual tarball. We try johnvansickle first, validate it's actually xz,
+    #     and fall back to BtbN if not.
+    FFMPEG_SOURCE="${FFMPEG_SOURCE:-btbn}"
     case "$FFMPEG_SOURCE" in
         btbn)
             download_dep "ffmpeg-master-latest-${FF_ARCH}-gpl.tar.xz" \
@@ -205,15 +210,30 @@ if [[ "$SKIP_DOWNLOAD" != "1" ]]; then
             download_dep "ffmpeg-release-${FF_ARCH_JOHN}-static.tar.xz" \
                 "https://www.johnvansickle.com/ffmpeg/releases/ffmpeg-release-${FF_ARCH_JOHN}-static.tar.xz" \
                 "$DEPS_DIR/ffmpeg.tar.xz"
-            mkdir -p "$DEPS_DIR/ffmpeg"
-            # The tarball has ffmpeg-$VERSION-<arch>-static/ at the top — strip 1 to get to its contents
-            tar -xf "$DEPS_DIR/ffmpeg.tar.xz" -C "$DEPS_DIR/ffmpeg" --strip-components=1
-            # johnvansickle puts binaries in $DEPS_DIR/ffmpeg/bin/ — flatten so callers see $DEPS_DIR/ffmpeg/ffmpeg
-            if [[ -d "$DEPS_DIR/ffmpeg/bin" ]]; then
-                mv "$DEPS_DIR/ffmpeg/bin/"* "$DEPS_DIR/ffmpeg/"
-                rmdir "$DEPS_DIR/ffmpeg/bin" 2>/dev/null || true
+            # CRITICAL: johnvansickle.com is behind Cloudflare, which occasionally
+            # serves a 7 KB "Just a moment..." HTML challenge page instead of the
+            # actual 40 MB xz tarball. curl sees HTTP 200 and exits 0 — but the
+            # file is HTML, not xz. Validate before extracting.
+            if ! file "$DEPS_DIR/ffmpeg.tar.xz" 2>/dev/null | grep -q "XZ compressed"; then
+                warn "johnvansickle returned an HTML Cloudflare challenge page instead of the tarball."
+                warn "Falling back to BtbN ffmpeg (larger but reliable)."
+                rm -f "$DEPS_DIR/ffmpeg.tar.xz"
+                download_dep "ffmpeg-master-latest-${FF_ARCH}-gpl.tar.xz" \
+                    "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-${FF_ARCH}-gpl.tar.xz" \
+                    "$DEPS_DIR/ffmpeg.tar.xz"
+                mkdir -p "$DEPS_DIR/ffmpeg"
+                tar -xf "$DEPS_DIR/ffmpeg.tar.xz" -C "$DEPS_DIR/ffmpeg" --strip-components=2
+            else
+                mkdir -p "$DEPS_DIR/ffmpeg"
+                # The tarball has ffmpeg-$VERSION-<arch>-static/ at the top — strip 1 to get to its contents
+                tar -xf "$DEPS_DIR/ffmpeg.tar.xz" -C "$DEPS_DIR/ffmpeg" --strip-components=1
+                # johnvansickle puts binaries in $DEPS_DIR/ffmpeg/bin/ — flatten so callers see $DEPS_DIR/ffmpeg/ffmpeg
+                if [[ -d "$DEPS_DIR/ffmpeg/bin" ]]; then
+                    mv "$DEPS_DIR/ffmpeg/bin/"* "$DEPS_DIR/ffmpeg/"
+                    rmdir "$DEPS_DIR/ffmpeg/bin" 2>/dev/null || true
+                fi
+                ok "Using johnvansickle ffmpeg (~100 MB smaller than BtbN master-latest)"
             fi
-            ok "Using johnvansickle ffmpeg (~100 MB smaller than BtbN master-latest)"
             ;;
     esac
 
