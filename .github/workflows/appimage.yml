@@ -188,8 +188,9 @@ jobs:
                   sudo ca-certificates \
                   build-essential \
                   autoconf automake autotools-dev libtool pkg-config \
+                  autopoint gettext \
                   meson ninja-build \
-                  gettext \
+                  aria2 \
                   blueprint-compiler \
                   libglib2.0-dev-bin libglib2.0-dev \
                   libgtk-4-dev \
