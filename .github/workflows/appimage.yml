@@ -125,27 +125,47 @@ jobs:
           fetch-depth: 1
 
       - name: Set up build dependencies (apt)
-        # GitHub's ubuntu-24.04 runner image occasionally has apt-get update failures
-        # because of pre-baked third-party apt sources that lag behind the Ubuntu
-        # archive. The simple, battle-tested fix is:
-        #   1. Just retry `apt-get update` a few times (most failures are transient)
-        #   2. If still failing, try `apt-get install` directly — the runner's
-        #      pre-baked package cache is usually fine for installing the dev packages
-        #      we need, even when a refresh fails.
-        # No source-list rewriting (that's a much bigger hammer that has caused
-        # its own issues). Trust the runner image.
+        # Ubuntu 24.04 (noble) ships libadwaita 1.5.0 — but Parabolic needs 1.7+ APIs
+        # (Adw.ButtonRow and Adw.SpinnerPaintable were both added in libadwaita 1.7,
+        # released March 2025). Ubuntu 25.10 (plucky) ships libadwaita 1.7.0.
         #
-        # NOTE on package list: Ubuntu does NOT ship a `libpangocairo-1.0-dev`
-        # package — the pangocairo development files are included in `libpango1.0-dev`.
-        # (We had this in the list earlier and apt failed with "Unable to locate package".)
+        # We use a backport approach: add plucky as a temporary apt source, install
+        # libadwaita-1-dev 1.7.0 from there, then disable the source so it doesn't
+        # pollute subsequent package installs.
         #
-        # NOTE on blueprint-compiler: Ubuntu 24.04 ships v0.12.0 in universe — recent
-        # enough for Parabolic. We install it via apt and skip the source-build step
-        # in the next workflow step.
+        # We also pin libadwaita to plucky via /etc/apt/preferences so apt picks
+        # the plucky version over noble's 1.5.0.
         run: |
           set +e  # we handle errors ourselves in the retry loops
 
+          echo "=== Step 0: Add plucky as apt source for newer libadwaita ==="
+          # Add the plucky repo. The apt pinning below ensures only libadwaita-*
+          # (and its runtime dep gir1.2-adw-1) come from plucky — everything else
+          # stays on noble.
+          # Note: we use printf (not heredoc) so the YAML block scalar stays valid.
+          printf '%s\n' \
+            'Types: deb' \
+            'URIs: http://archive.ubuntu.com/ubuntu/' \
+            'Suites: plucky' \
+            'Components: main' \
+            'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' \
+            'Architectures: amd64' \
+            | sudo tee /etc/apt/sources.list.d/plucky-libadwaita.sources > /dev/null
+          # Pin libadwaita to plucky (priority 990 = treat as preferred source),
+          # everything else from plucky gets priority -1 (never install from plucky
+          # unless explicitly requested).
+          printf '%s\n' \
+            'Package: libadwaita-1-0 libadwaita-1-dev libadwaita-1-doc libadwaita-1-examples gir1.2-adw-1' \
+            'Pin: release n=plucky' \
+            'Pin-Priority: 990' \
+            '' \
+            'Package: *' \
+            'Pin: release n=plucky' \
+            'Pin-Priority: -1' \
+            | sudo tee /etc/apt/preferences.d/libadwaita-plucky > /dev/null
+
           echo "=== apt-get update (with retries) ==="
+          UPDATE_OK=0
           for attempt in 1 2 3 4 5; do
             echo ""
             echo "--- apt-get update attempt $attempt/5 ---"
@@ -154,6 +174,7 @@ jobs:
                   -o Acquire::http::Timeout=60 \
                   -o Acquire::https::Timeout=60; then
               echo "✔ apt-get update succeeded on attempt $attempt"
+              UPDATE_OK=1
               break
             fi
             if [ "$attempt" = "5" ]; then
@@ -164,6 +185,16 @@ jobs:
               sleep 10
             fi
           done
+          # Even if update failed, try at least one more time with the plucky source disabled
+          if [ "$UPDATE_OK" != "1" ]; then
+            sudo sed -i 's/^Enabled: yes/Enabled: no/' /etc/apt/sources.list.d/plucky-libadwaita.sources
+            sudo apt-get update -y -o Acquire::Retries=5 2>/dev/null || true
+            sudo sed -i 's/^Enabled: no/Enabled: yes/' /etc/apt/sources.list.d/plucky-libadwaita.sources
+          fi
+
+          echo ""
+          echo "=== Verify libadwaita candidate is from plucky ==="
+          apt-cache policy libadwaita-1-dev | head -5
 
           echo ""
           echo "=== apt-get install (with retries) ==="
@@ -183,7 +214,8 @@ jobs:
                   gettext \
                   blueprint-compiler \
                   libglib2.0-dev-bin libglib2.0-dev \
-                  libgtk-4-dev libadwaita-1-dev \
+                  libgtk-4-dev \
+                  libadwaita-1-dev \
                   libgdk-pixbuf-2.0-dev libgdk-pixbuf2.0-0 libgdk-pixbuf2.0-bin \
                   libgirepository1.0-dev python3-gi \
                   desktop-file-utils \
@@ -217,8 +249,17 @@ jobs:
             echo "::error::apt-get install did not complete successfully"
             exit 100
           fi
+
+          # Disable the plucky source now that libadwaita is installed — prevents
+          # future package updates from accidentally pulling plucky versions.
+          sudo sed -i 's/^Enabled: yes/Enabled: no/' /etc/apt/sources.list.d/plucky-libadwaita.sources 2>/dev/null || true
+          sudo rm -f /etc/apt/preferences.d/libadwaita-plucky 2>/dev/null || true
+
           echo ""
           echo "✔ All packages installed successfully"
+          echo ""
+          echo "=== Verify libadwaita version installed ==="
+          dpkg -l libadwaita-1-dev | tail -2
           echo ""
           echo "=== blueprint-compiler version ==="
           blueprint-compiler --version
