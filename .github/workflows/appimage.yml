@@ -114,60 +114,121 @@ jobs:
           fetch-depth: 1
 
       - name: Set up build dependencies (apt)
-        # apt-get can occasionally fail with exit code 100 due to:
-        #   - Transient mirror failures (403/404 fetching Packages.gz)
-        #   - Hash sum mismatches when Ubuntu archive mirrors are mid-sync
-        #   - Lock file contention with the runner's own background services
-        # We retry up to 3 times with `Acquire::Retries=5` and longer timeouts
-        # to ride through transient issues.
+        # apt-get on GitHub's ubuntu-22.04 runners has a long history of transient failures
+        # because the pre-baked /etc/apt/sources.list occasionally points at mirrors that
+        # have rotated or are mid-sync. See:
+        #   https://github.com/actions/runner-images/issues/12865  (cannot update from Ubuntu)
+        #   https://github.com/actions/runner-images/issues/12599  (Apt install started failing)
+        #
+        # The robust fix is:
+        #   1. Reset sources.list to the canonical azure.archive.ubuntu.com mirror
+        #      (this is what the runner image was originally built against; it's the
+        #       most reliable mirror from Azure-hosted runners)
+        #   2. Wipe any stale apt cache state (lists, pkgcache, srcpkgcache)
+        #   3. Run apt-get update with retries
+        #   4. Run apt-get install with retries
         run: |
           set -e
-          # Retry the update + install up to 3 times
-          for attempt in 1 2 3; do
+
+          echo "=== Step 1: Reset /etc/apt/sources.list to canonical Ubuntu mirror ==="
+          # Save the original
+          sudo cp /etc/apt/sources.list /etc/apt/sources.list.bak 2>/dev/null || true
+          # Rewrite with only the canonical azure mirror (the one GitHub runners
+          # were originally built against — most reliable from Azure regions).
+          # jammy = Ubuntu 22.04
+          # Note: we use printf (not heredoc) so the YAML block scalar stays valid.
+          printf '%s\n' \
+            'deb http://azure.archive.ubuntu.com/ubuntu/ jammy main restricted universe multiverse' \
+            'deb http://azure.archive.ubuntu.com/ubuntu/ jammy-updates main restricted universe multiverse' \
+            'deb http://azure.archive.ubuntu.com/ubuntu/ jammy-backports main restricted universe multiverse' \
+            'deb http://azure.archive.ubuntu.com/ubuntu/ jammy-security main restricted universe multiverse' \
+            | sudo tee /etc/apt/sources.list > /dev/null
+          # Disable any third-party sources the runner image might have pre-installed
+          # (these are a common source of transient failures — Microsoft's own apt
+          # repositories sometimes lag behind Ubuntu archive updates).
+          sudo mkdir -p /etc/apt/sources.list.d.disabled
+          for f in /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
+            [ -f "$f" ] && sudo mv "$f" /etc/apt/sources.list.d.disabled/ 2>/dev/null || true
+          done
+
+          echo "=== Step 2: Wipe stale apt cache state ==="
+          sudo rm -rf /var/lib/apt/lists/* /var/cache/apt/*.bin
+          sudo apt-get clean
+
+          echo "=== Step 3: apt-get update (with retries) ==="
+          for attempt in 1 2 3 4 5; do
             echo ""
-            echo "=== apt-get update attempt $attempt/3 ==="
-            sudo apt-get update -y \
-              -o Acquire::Retries=5 \
-              -o Acquire::http::Timeout=30 \
-              -o Acquire::https::Timeout=30 \
-              -o Acquire::ftp::Timeout=30 && break
-            if [ "$attempt" = "3" ]; then
-              echo "::error::apt-get update failed after 3 attempts. Possible causes:"
-              echo "::error::  - Transient Ubuntu archive mirror outage (retry later)"
-              echo "::error::  - Network issue on the GitHub runner"
-              echo "::error::  - Hash sum mismatch (Ubuntu archive mid-sync)"
-              echo "::error::Check https://status.github.com and https://launchpad.net/ubuntu/+archivemirrors for known issues."
+            echo "--- attempt $attempt/5 ---"
+            if sudo apt-get update -y \
+                  -o Acquire::Retries=5 \
+                  -o Acquire::http::Timeout=60 \
+                  -o Acquire::https::Timeout=60; then
+              echo "✔ apt-get update succeeded on attempt $attempt"
+              break
+            fi
+            if [ "$attempt" = "5" ]; then
+              echo "::error::apt-get update failed after 5 attempts."
+              echo "::error::Try one of:"
+              echo "::error::  - Re-run the workflow (Actions tab → Re-run failed jobs)"
+              echo "::error::  - Switch the runner to ubuntu-24.04 (in .github/workflows/appimage.yml)"
+              echo "::error::  - Check https://github.com/actions/runner-images/issues for known outages"
               exit 100
             fi
-            echo "apt-get update failed on attempt $attempt. Sleeping 15s before retry..."
-            sleep 15
+            echo "apt-get update failed on attempt $attempt. Sleeping 20s before retry..."
+            sleep 20
           done
+
           echo ""
-          echo "=== apt-get install (with retries) ==="
-          sudo apt-get install -y \
-            -o Acquire::Retries=5 \
-            -o Acquire::http::Timeout=30 \
-            -o Acquire::https::Timeout=30 \
-            -o Dpkg::Options::="--force-confdef" \
-            -o Dpkg::Options::="--force-confold" \
-            build-essential \
-            autoconf automake autotools-dev libtool pkg-config \
-            meson ninja-build \
-            gettext \
-            libglib2.0-dev-bin libglib2.0-dev \
-            libgtk-4-dev libadwaita-1-dev \
-            libgdk-pixbuf-2.0-dev libgdk-pixbuf2.0-0 libgdk-pixbuf2.0-bin \
-            libgirepository1.0-dev python3-gi \
-            desktop-file-utils \
-            libssl-dev libc-ares-dev libxml2-dev zlib1g-dev \
-            libsqlite3-dev \
-            libgraphene-1.0-dev libepoxy-dev \
-            libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
-            libpango1.0-dev libpangocairo-1.0-dev libcairo2-dev \
-            libfribidi-dev libharfbuzz-dev libfreetype6-dev libfontconfig1-dev \
-            libpixman-1-dev libffi-dev libpcre2-dev \
-            binutils file \
-            git curl wget unzip tar
+          echo "=== Step 4: apt-get install (with retries) ==="
+          # Don't use `set -e` here — we want to catch apt failures and retry,
+          # not abort the whole script on first failure.
+          set +e
+          APT_INSTALL_OK=0
+          for attempt in 1 2 3; do
+            if sudo apt-get install -y \
+                  -o Acquire::Retries=5 \
+                  -o Acquire::http::Timeout=60 \
+                  -o Acquire::https::Timeout=60 \
+                  -o Dpkg::Options::="--force-confdef" \
+                  -o Dpkg::Options::="--force-confold" \
+                  build-essential \
+                  autoconf automake autotools-dev libtool pkg-config \
+                  meson ninja-build \
+                  gettext \
+                  libglib2.0-dev-bin libglib2.0-dev \
+                  libgtk-4-dev libadwaita-1-dev \
+                  libgdk-pixbuf-2.0-dev libgdk-pixbuf2.0-0 libgdk-pixbuf2.0-bin \
+                  libgirepository1.0-dev python3-gi \
+                  desktop-file-utils \
+                  libssl-dev libc-ares-dev libxml2-dev zlib1g-dev \
+                  libsqlite3-dev \
+                  libgraphene-1.0-dev libepoxy-dev \
+                  libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
+                  libpango1.0-dev libpangocairo-1.0-dev libcairo2-dev \
+                  libfribidi-dev libharfbuzz-dev libfreetype6-dev libfontconfig1-dev \
+                  libpixman-1-dev libffi-dev libpcre2-dev \
+                  binutils file \
+                  git curl wget unzip tar; then
+              echo "✔ apt-get install succeeded on attempt $attempt"
+              APT_INSTALL_OK=1
+              break
+            fi
+            if [ "$attempt" = "3" ]; then
+              echo "::error::apt-get install failed after 3 attempts."
+              echo "::error::The package index was refreshed successfully but a specific package failed to install."
+              echo "::error::This usually means a broken package on Ubuntu 22.04 (jammy)."
+              echo "::error::Try switching to ubuntu-24.04 in .github/workflows/appimage.yml."
+              exit 100
+            fi
+            echo "apt-get install failed on attempt $attempt. Sleeping 20s before retry..."
+            sleep 20
+          done
+          # Re-enable exit-on-error for any subsequent commands in the step
+          set -e
+          if [ "$APT_INSTALL_OK" != "1" ]; then
+            echo "::error::apt-get install did not complete successfully"
+            exit 100
+          fi
 
       - name: Install blueprint-compiler (build from source if not packaged)
         run: |
