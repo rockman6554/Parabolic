@@ -114,10 +114,16 @@ env:
 jobs:
   build-appimage:
     name: Build x86_64 AppImage
-    runs-on: ubuntu-24.04  # glibc 2.39 — runs on any Linux with glibc >= 2.39 (Ubuntu 24.04+, Debian 13+, Fedora 40+)
-                           # Was ubuntu-22.04, but jammy's GTK 4.6 is too old for current Parabolic
-                           # (which targets org.gnome.Platform 50 / GTK 4.18). Ubuntu 24.04 has GTK 4.14,
-                           # much closer to upstream.
+    runs-on: ubuntu-latest
+    # Run inside a Ubuntu 25.10 (plucky) container — has the correct versions of:
+    #   - libgtk-4-dev 4.18.4 (Parabolic needs >= 4.17.5)
+    #   - libadwaita-1-dev 1.7.0 (Parabolic needs >= 1.7 — uses Adw.ButtonRow, Adw.SpinnerPaintable)
+    #   - blueprint-compiler 0.16.0 (Parabolic needs >= 0.10)
+    # The host runner (ubuntu-latest = 24.04) only provides the kernel; all apt
+    # installs happen inside the plucky container.
+    container:
+      image: ubuntu:25.10
+      options: --privileged  # needed for AppImage / FUSE operations in linuxdeploy
     steps:
       - name: Checkout fork
         uses: actions/checkout@v5
@@ -125,51 +131,25 @@ jobs:
           fetch-depth: 1
 
       - name: Set up build dependencies (apt)
-        # Ubuntu 24.04 (noble) ships libadwaita 1.5.0 — but Parabolic needs 1.7+ APIs
-        # (Adw.ButtonRow and Adw.SpinnerPaintable were both added in libadwaita 1.7,
-        # released March 2025). Ubuntu 25.10 (plucky) ships libadwaita 1.7.0.
+        # Inside the plucky container, we have native access to all the recent
+        # GTK/libadwaita versions Parabolic needs. No source-list rewriting,
+        # no plucky backport pinning, no source builds.
         #
-        # We use a backport approach: add plucky as a temporary apt source, install
-        # libadwaita-1-dev 1.7.0 from there, then disable the source so it doesn't
-        # pollute subsequent package installs.
+        # NOTE on package list: Ubuntu does NOT ship a `libpangocairo-1.0-dev`
+        # package — the pangocairo development files are included in `libpango1.0-dev`.
         #
-        # We also pin libadwaita to plucky via /etc/apt/preferences so apt picks
-        # the plucky version over noble's 1.5.0.
+        # NOTE: Inside the container, we're root — no `sudo` prefix needed.
         run: |
           set +e  # we handle errors ourselves in the retry loops
 
-          echo "=== Step 0: Add plucky as apt source for newer libadwaita ==="
-          # Add the plucky repo. The apt pinning below ensures only libadwaita-*
-          # (and its runtime dep gir1.2-adw-1) come from plucky — everything else
-          # stays on noble.
-          # Note: we use printf (not heredoc) so the YAML block scalar stays valid.
-          printf '%s\n' \
-            'Types: deb' \
-            'URIs: http://archive.ubuntu.com/ubuntu/' \
-            'Suites: plucky' \
-            'Components: main' \
-            'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' \
-            'Architectures: amd64' \
-            | sudo tee /etc/apt/sources.list.d/plucky-libadwaita.sources > /dev/null
-          # Pin libadwaita to plucky (priority 990 = treat as preferred source),
-          # everything else from plucky gets priority -1 (never install from plucky
-          # unless explicitly requested).
-          printf '%s\n' \
-            'Package: libadwaita-1-0 libadwaita-1-dev libadwaita-1-doc libadwaita-1-examples gir1.2-adw-1' \
-            'Pin: release n=plucky' \
-            'Pin-Priority: 990' \
-            '' \
-            'Package: *' \
-            'Pin: release n=plucky' \
-            'Pin-Priority: -1' \
-            | sudo tee /etc/apt/preferences.d/libadwaita-plucky > /dev/null
-
+          # First-time setup inside the container — the plucky image ships
+          # with a very minimal apt state, so we need to refresh.
           echo "=== apt-get update (with retries) ==="
           UPDATE_OK=0
           for attempt in 1 2 3 4 5; do
             echo ""
             echo "--- apt-get update attempt $attempt/5 ---"
-            if sudo apt-get update -y \
+            if apt-get update -y \
                   -o Acquire::Retries=5 \
                   -o Acquire::http::Timeout=60 \
                   -o Acquire::https::Timeout=60; then
@@ -179,22 +159,11 @@ jobs:
             fi
             if [ "$attempt" = "5" ]; then
               echo "⚠ apt-get update failed after 5 attempts — proceeding to install anyway"
-              echo "  (the runner's pre-baked package cache is usually enough)"
             else
               echo "apt-get update failed on attempt $attempt. Sleeping 10s before retry..."
               sleep 10
             fi
           done
-          # Even if update failed, try at least one more time with the plucky source disabled
-          if [ "$UPDATE_OK" != "1" ]; then
-            sudo sed -i 's/^Enabled: yes/Enabled: no/' /etc/apt/sources.list.d/plucky-libadwaita.sources
-            sudo apt-get update -y -o Acquire::Retries=5 2>/dev/null || true
-            sudo sed -i 's/^Enabled: no/Enabled: yes/' /etc/apt/sources.list.d/plucky-libadwaita.sources
-          fi
-
-          echo ""
-          echo "=== Verify libadwaita candidate is from plucky ==="
-          apt-cache policy libadwaita-1-dev | head -5
 
           echo ""
           echo "=== apt-get install (with retries) ==="
@@ -202,12 +171,13 @@ jobs:
           for attempt in 1 2 3 4 5; do
             echo ""
             echo "--- apt-get install attempt $attempt/5 ---"
-            if sudo apt-get install -y \
+            if apt-get install -y \
                   -o Acquire::Retries=5 \
                   -o Acquire::http::Timeout=60 \
                   -o Acquire::https::Timeout=60 \
                   -o Dpkg::Options::="--force-confdef" \
                   -o Dpkg::Options::="--force-confold" \
+                  sudo ca-certificates \
                   build-essential \
                   autoconf automake autotools-dev libtool pkg-config \
                   meson ninja-build \
@@ -235,7 +205,7 @@ jobs:
             fi
             if [ "$attempt" = "5" ]; then
               echo "::error::apt-get install failed after 5 attempts."
-              echo "::error::Most likely cause: a broken package on Ubuntu 24.04 (noble)."
+              echo "::error::Most likely cause: a broken package on Ubuntu 25.10 (plucky)."
               echo "::error::Workarounds:"
               echo "::error::  - Re-run the workflow (Actions tab → Re-run failed jobs)"
               echo "::error::  - Check https://github.com/actions/runner-images/issues for known outages"
@@ -249,37 +219,33 @@ jobs:
             echo "::error::apt-get install did not complete successfully"
             exit 100
           fi
-
-          # Disable the plucky source now that libadwaita is installed — prevents
-          # future package updates from accidentally pulling plucky versions.
-          sudo sed -i 's/^Enabled: yes/Enabled: no/' /etc/apt/sources.list.d/plucky-libadwaita.sources 2>/dev/null || true
-          sudo rm -f /etc/apt/preferences.d/libadwaita-plucky 2>/dev/null || true
-
           echo ""
           echo "✔ All packages installed successfully"
           echo ""
-          echo "=== Verify libadwaita version installed ==="
+          echo "=== Verify libadwaita version (should be 1.7.0) ==="
           dpkg -l libadwaita-1-dev | tail -2
           echo ""
-          echo "=== blueprint-compiler version ==="
+          echo "=== Verify libgtk-4 version (should be 4.18.x) ==="
+          dpkg -l libgtk-4-dev | tail -2
+          echo ""
+          echo "=== blueprint-compiler version (should be 0.16.0) ==="
           blueprint-compiler --version
 
       - name: "Install blueprint-compiler (fallback: build from source if too old)"
-        # Ubuntu 24.04 ships blueprint-compiler v0.12.0 which is recent enough for
-        # Parabolic. This step only runs if the apt-installed version is too old
-        # (< 0.10) — in which case we build the latest release from source.
+        # Plucky ships blueprint-compiler 0.16.0 which is recent enough for Parabolic.
+        # This step only runs if the apt-installed version is somehow missing or too old.
         # Note: the upstream git tag is `v0.10.0` (WITH v prefix), not `0.10.0`.
         run: |
           if ! command -v blueprint-compiler >/dev/null 2>&1; then
             echo "Building blueprint-compiler from source (not installed via apt)..."
             git clone --depth 1 --branch v0.10.0 https://gitlab.gnome.org/GNOME/blueprint-compiler.git /tmp/bpc
-            (cd /tmp/bpc && meson setup build --prefix=/usr && ninja -C build && sudo ninja -C build install)
+            (cd /tmp/bpc && meson setup build --prefix=/usr && ninja -C build && ninja -C build install)
           elif ! blueprint-compiler --version 2>/dev/null | grep -qE '0\.(1[0-9]|[2-9][0-9])\.'; then
             echo "Installed blueprint-compiler is too old, building v0.10.0 from source..."
             echo "Current version: $(blueprint-compiler --version 2>&1)"
-            sudo apt-get remove -y blueprint-compiler 2>/dev/null || true
+            apt-get remove -y blueprint-compiler 2>/dev/null || true
             git clone --depth 1 --branch v0.10.0 https://gitlab.gnome.org/GNOME/blueprint-compiler.git /tmp/bpc
-            (cd /tmp/bpc && meson setup build --prefix=/usr && ninja -C build && sudo ninja -C build install)
+            (cd /tmp/bpc && meson setup build --prefix=/usr && ninja -C build && ninja -C build install)
           else
             echo "✔ blueprint-compiler already installed: $(blueprint-compiler --version 2>&1)"
           fi
