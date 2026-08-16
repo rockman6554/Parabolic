@@ -67,10 +67,18 @@ on:
       - "packaging/appimage/**"
       - ".github/workflows/appimage.yml"
 
-# Cancel superseded runs on the same PR/branch
+# Concurrency control:
+# We use `cancel-in-progress: false` (NOT true) so each push gets its own complete run.
+# Setting `cancel-in-progress: true` would cancel any in-progress run when a new
+# commit is pushed — which is bad for our use case because:
+#   1. The user often pushes multiple "Hotfix ..." commits in quick succession
+#   2. Each cancelled run never gets to actually verify whether the fix worked
+#   3. The "Canceling since a higher priority waiting request exists" message
+#      is confusing — looks like an apt failure but isn't.
+# With `false`, runs queue up and execute in order — slower, but each one completes.
 concurrency:
   group: appimage-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 permissions:
   contents: write  # needed for softprops/action-gh-release to upload AppImage to Release
@@ -126,6 +134,10 @@ jobs:
         #      we need, even when a refresh fails.
         # No source-list rewriting (that's a much bigger hammer that has caused
         # its own issues). Trust the runner image.
+        #
+        # NOTE on package list: Ubuntu does NOT ship a `libpangocairo-1.0-dev`
+        # package — the pangocairo development files are included in `libpango1.0-dev`.
+        # (We had this in the list earlier and apt failed with "Unable to locate package".)
         run: |
           set +e  # we handle errors ourselves in the retry loops
 
@@ -174,7 +186,8 @@ jobs:
                   libsqlite3-dev \
                   libgraphene-1.0-dev libepoxy-dev \
                   libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
-                  libpango1.0-dev libpangocairo-1.0-dev libcairo2-dev \
+                  libpango1.0-dev \
+                  libcairo2-dev \
                   libfribidi-dev libharfbuzz-dev libfreetype6-dev libfontconfig1-dev \
                   libpixman-1-dev libffi-dev libpcre2-dev \
                   binutils file \
@@ -185,9 +198,8 @@ jobs:
             fi
             if [ "$attempt" = "5" ]; then
               echo "::error::apt-get install failed after 5 attempts."
-              echo "::error::Most likely cause: a broken package on Ubuntu 22.04 (jammy)."
+              echo "::error::Most likely cause: a broken package on Ubuntu 24.04 (noble)."
               echo "::error::Workarounds:"
-              echo "::error::  - Switch the runner to ubuntu-24.04 in .github/workflows/appimage.yml"
               echo "::error::  - Re-run the workflow (Actions tab → Re-run failed jobs)"
               echo "::error::  - Check https://github.com/actions/runner-images/issues for known outages"
               exit 100
