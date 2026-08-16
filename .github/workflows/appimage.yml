@@ -106,7 +106,10 @@ env:
 jobs:
   build-appimage:
     name: Build x86_64 AppImage
-    runs-on: ubuntu-22.04  # glibc 2.35 — maximises host compatibility
+    runs-on: ubuntu-24.04  # glibc 2.39 — runs on any Linux with glibc >= 2.39 (Ubuntu 24.04+, Debian 13+, Fedora 40+)
+                           # Was ubuntu-22.04, but jammy's GTK 4.6 is too old for current Parabolic
+                           # (which targets org.gnome.Platform 50 / GTK 4.18). Ubuntu 24.04 has GTK 4.14,
+                           # much closer to upstream.
     steps:
       - name: Checkout fork
         uses: actions/checkout@v5
@@ -114,51 +117,22 @@ jobs:
           fetch-depth: 1
 
       - name: Set up build dependencies (apt)
-        # apt-get on GitHub's ubuntu-22.04 runners has a long history of transient failures
-        # because the pre-baked /etc/apt/sources.list occasionally points at mirrors that
-        # have rotated or are mid-sync. See:
-        #   https://github.com/actions/runner-images/issues/12865  (cannot update from Ubuntu)
-        #   https://github.com/actions/runner-images/issues/12599  (Apt install started failing)
-        #
-        # The robust fix is:
-        #   1. Reset sources.list to the canonical azure.archive.ubuntu.com mirror
-        #      (this is what the runner image was originally built against; it's the
-        #       most reliable mirror from Azure-hosted runners)
-        #   2. Wipe any stale apt cache state (lists, pkgcache, srcpkgcache)
-        #   3. Run apt-get update with retries
-        #   4. Run apt-get install with retries
+        # GitHub's ubuntu-24.04 runner image occasionally has apt-get update failures
+        # because of pre-baked third-party apt sources that lag behind the Ubuntu
+        # archive. The simple, battle-tested fix is:
+        #   1. Just retry `apt-get update` a few times (most failures are transient)
+        #   2. If still failing, try `apt-get install` directly — the runner's
+        #      pre-baked package cache is usually fine for installing the dev packages
+        #      we need, even when a refresh fails.
+        # No source-list rewriting (that's a much bigger hammer that has caused
+        # its own issues). Trust the runner image.
         run: |
-          set -e
+          set +e  # we handle errors ourselves in the retry loops
 
-          echo "=== Step 1: Reset /etc/apt/sources.list to canonical Ubuntu mirror ==="
-          # Save the original
-          sudo cp /etc/apt/sources.list /etc/apt/sources.list.bak 2>/dev/null || true
-          # Rewrite with only the canonical azure mirror (the one GitHub runners
-          # were originally built against — most reliable from Azure regions).
-          # jammy = Ubuntu 22.04
-          # Note: we use printf (not heredoc) so the YAML block scalar stays valid.
-          printf '%s\n' \
-            'deb http://azure.archive.ubuntu.com/ubuntu/ jammy main restricted universe multiverse' \
-            'deb http://azure.archive.ubuntu.com/ubuntu/ jammy-updates main restricted universe multiverse' \
-            'deb http://azure.archive.ubuntu.com/ubuntu/ jammy-backports main restricted universe multiverse' \
-            'deb http://azure.archive.ubuntu.com/ubuntu/ jammy-security main restricted universe multiverse' \
-            | sudo tee /etc/apt/sources.list > /dev/null
-          # Disable any third-party sources the runner image might have pre-installed
-          # (these are a common source of transient failures — Microsoft's own apt
-          # repositories sometimes lag behind Ubuntu archive updates).
-          sudo mkdir -p /etc/apt/sources.list.d.disabled
-          for f in /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
-            [ -f "$f" ] && sudo mv "$f" /etc/apt/sources.list.d.disabled/ 2>/dev/null || true
-          done
-
-          echo "=== Step 2: Wipe stale apt cache state ==="
-          sudo rm -rf /var/lib/apt/lists/* /var/cache/apt/*.bin
-          sudo apt-get clean
-
-          echo "=== Step 3: apt-get update (with retries) ==="
+          echo "=== apt-get update (with retries) ==="
           for attempt in 1 2 3 4 5; do
             echo ""
-            echo "--- attempt $attempt/5 ---"
+            echo "--- apt-get update attempt $attempt/5 ---"
             if sudo apt-get update -y \
                   -o Acquire::Retries=5 \
                   -o Acquire::http::Timeout=60 \
@@ -167,24 +141,20 @@ jobs:
               break
             fi
             if [ "$attempt" = "5" ]; then
-              echo "::error::apt-get update failed after 5 attempts."
-              echo "::error::Try one of:"
-              echo "::error::  - Re-run the workflow (Actions tab → Re-run failed jobs)"
-              echo "::error::  - Switch the runner to ubuntu-24.04 (in .github/workflows/appimage.yml)"
-              echo "::error::  - Check https://github.com/actions/runner-images/issues for known outages"
-              exit 100
+              echo "⚠ apt-get update failed after 5 attempts — proceeding to install anyway"
+              echo "  (the runner's pre-baked package cache is usually enough)"
+            else
+              echo "apt-get update failed on attempt $attempt. Sleeping 10s before retry..."
+              sleep 10
             fi
-            echo "apt-get update failed on attempt $attempt. Sleeping 20s before retry..."
-            sleep 20
           done
 
           echo ""
-          echo "=== Step 4: apt-get install (with retries) ==="
-          # Don't use `set -e` here — we want to catch apt failures and retry,
-          # not abort the whole script on first failure.
-          set +e
-          APT_INSTALL_OK=0
-          for attempt in 1 2 3; do
+          echo "=== apt-get install (with retries) ==="
+          INSTALL_OK=0
+          for attempt in 1 2 3 4 5; do
+            echo ""
+            echo "--- apt-get install attempt $attempt/5 ---"
             if sudo apt-get install -y \
                   -o Acquire::Retries=5 \
                   -o Acquire::http::Timeout=60 \
@@ -210,25 +180,28 @@ jobs:
                   binutils file \
                   git curl wget unzip tar; then
               echo "✔ apt-get install succeeded on attempt $attempt"
-              APT_INSTALL_OK=1
+              INSTALL_OK=1
               break
             fi
-            if [ "$attempt" = "3" ]; then
-              echo "::error::apt-get install failed after 3 attempts."
-              echo "::error::The package index was refreshed successfully but a specific package failed to install."
-              echo "::error::This usually means a broken package on Ubuntu 22.04 (jammy)."
-              echo "::error::Try switching to ubuntu-24.04 in .github/workflows/appimage.yml."
+            if [ "$attempt" = "5" ]; then
+              echo "::error::apt-get install failed after 5 attempts."
+              echo "::error::Most likely cause: a broken package on Ubuntu 22.04 (jammy)."
+              echo "::error::Workarounds:"
+              echo "::error::  - Switch the runner to ubuntu-24.04 in .github/workflows/appimage.yml"
+              echo "::error::  - Re-run the workflow (Actions tab → Re-run failed jobs)"
+              echo "::error::  - Check https://github.com/actions/runner-images/issues for known outages"
               exit 100
             fi
-            echo "apt-get install failed on attempt $attempt. Sleeping 20s before retry..."
-            sleep 20
+            echo "apt-get install failed on attempt $attempt. Sleeping 15s before retry..."
+            sleep 15
           done
-          # Re-enable exit-on-error for any subsequent commands in the step
-          set -e
-          if [ "$APT_INSTALL_OK" != "1" ]; then
+
+          if [ "$INSTALL_OK" != "1" ]; then
             echo "::error::apt-get install did not complete successfully"
             exit 100
           fi
+          echo ""
+          echo "✔ All packages installed successfully"
 
       - name: Install blueprint-compiler (build from source if not packaged)
         run: |
