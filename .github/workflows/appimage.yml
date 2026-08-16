@@ -121,6 +121,11 @@ jobs:
     #   - blueprint-compiler 0.16.0 (Parabolic needs >= 0.10)
     # The host runner (ubuntu-latest = 24.04) only provides the kernel; all apt
     # installs happen inside the plucky container.
+    #
+    # NOTE: Docker Hub's `ubuntu:25.10` image currently resolves to Ubuntu 25.04 (questing),
+    # which is the latest STABLE interim release. Plucky (25.10) is in development.
+    # Questing is even better for our purposes — it ships libadwaita 1.8.0, GTK 4.20.1,
+    # and blueprint-compiler 0.18.0.
     container:
       image: ubuntu:25.10
       options: --privileged  # needed for AppImage / FUSE operations in linuxdeploy
@@ -131,19 +136,22 @@ jobs:
           fetch-depth: 1
 
       - name: Set up build dependencies (apt)
-        # Inside the plucky container, we have native access to all the recent
+        # Inside the plucky/questing container, we have native access to all the recent
         # GTK/libadwaita versions Parabolic needs. No source-list rewriting,
         # no plucky backport pinning, no source builds.
         #
-        # NOTE on package list: Ubuntu does NOT ship a `libpangocairo-1.0-dev`
-        # package — the pangocairo development files are included in `libpango1.0-dev`.
+        # Package renames to be aware of (vs Ubuntu 24.04 noble):
+        #   - `libgdk-pixbuf2.0-0` (transitional) → `libgdk-pixbuf-2.0-0` (with hyphen)
+        #   - `libfreetype6-dev` → `libfreetype-dev` (the `6` was dropped from the dev pkg name)
+        #   - `libpangocairo-1.0-dev` does NOT exist on Ubuntu (pangocairo dev files
+        #     are bundled inside `libpango1.0-dev`)
         #
         # NOTE: Inside the container, we're root — no `sudo` prefix needed.
         run: |
           set +e  # we handle errors ourselves in the retry loops
 
-          # First-time setup inside the container — the plucky image ships
-          # with a very minimal apt state, so we need to refresh.
+          # First-time setup inside the container — the image ships with a very
+          # minimal apt state, so we need to refresh.
           echo "=== apt-get update (with retries) ==="
           UPDATE_OK=0
           for attempt in 1 2 3 4 5; do
@@ -186,7 +194,7 @@ jobs:
                   libglib2.0-dev-bin libglib2.0-dev \
                   libgtk-4-dev \
                   libadwaita-1-dev \
-                  libgdk-pixbuf-2.0-dev libgdk-pixbuf2.0-0 libgdk-pixbuf2.0-bin \
+                  libgdk-pixbuf-2.0-dev libgdk-pixbuf-2.0-0 libgdk-pixbuf2.0-bin \
                   libgirepository1.0-dev python3-gi \
                   desktop-file-utils \
                   libssl-dev libc-ares-dev libxml2-dev zlib1g-dev \
@@ -195,7 +203,7 @@ jobs:
                   libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
                   libpango1.0-dev \
                   libcairo2-dev \
-                  libfribidi-dev libharfbuzz-dev libfreetype6-dev libfontconfig1-dev \
+                  libfribidi-dev libharfbuzz-dev libfreetype-dev libfontconfig1-dev \
                   libpixman-1-dev libffi-dev libpcre2-dev \
                   binutils file \
                   git curl wget unzip tar; then
@@ -205,7 +213,7 @@ jobs:
             fi
             if [ "$attempt" = "5" ]; then
               echo "::error::apt-get install failed after 5 attempts."
-              echo "::error::Most likely cause: a broken package on Ubuntu 25.10 (plucky)."
+              echo "::error::Most likely cause: a broken package on Ubuntu 25.04/25.10."
               echo "::error::Workarounds:"
               echo "::error::  - Re-run the workflow (Actions tab → Re-run failed jobs)"
               echo "::error::  - Check https://github.com/actions/runner-images/issues for known outages"
@@ -222,13 +230,13 @@ jobs:
           echo ""
           echo "✔ All packages installed successfully"
           echo ""
-          echo "=== Verify libadwaita version (should be 1.7.0) ==="
+          echo "=== Verify libadwaita version (should be 1.8.0) ==="
           dpkg -l libadwaita-1-dev | tail -2
           echo ""
-          echo "=== Verify libgtk-4 version (should be 4.18.x) ==="
+          echo "=== Verify libgtk-4 version (should be 4.20.x) ==="
           dpkg -l libgtk-4-dev | tail -2
           echo ""
-          echo "=== blueprint-compiler version (should be 0.16.0) ==="
+          echo "=== blueprint-compiler version (should be 0.18.0) ==="
           blueprint-compiler --version
 
       - name: "Install blueprint-compiler (fallback: build from source if too old)"
