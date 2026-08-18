@@ -40,11 +40,6 @@ on:
         required: false
         default: "main"
         type: string
-      bundle_deno:
-        description: "Bundle deno (~92 MB)? Default: true — yt-dlp requires it for JS-based extractors"
-        required: false
-        default: true
-        type: boolean
       ffmpeg_source:
         description: "ffmpeg source — btbn (~140 MB, GitHub Releases, reliable — DEFAULT) or johnvansickle (~40 MB, but Cloudflare-protected, auto-falls-back to btbn on failure)"
         required: false
@@ -100,7 +95,7 @@ env:
   # Size-reduction knobs (default = smallest AppImage that still has all features
   # Parabolic + yt-dlp need; deno IS bundled because yt-dlp requires it for JS extractors).
   # Expected size: ~171 MB.
-  BUNDLE_DENO: ${{ inputs.bundle_deno == false && '0' || '1' }}
+  BUNDLE_DENO: "1"  # always bundle deno — required by yt-dlp for JS-based extractors
   STRIP_BINARIES: "1"
   REMOVE_PDB: "1"
   SKIP_FFPLAY: "1"
@@ -405,27 +400,3 @@ jobs:
 
             **SHA256 checksum** — see the attached `.sha256` file.
 
-            ### Size-reduction knobs used
-            - `FFMPEG_SOURCE=${{ env.FFMPEG_SOURCE }}` (btbn = ~140 MB, reliable; johnvansickle = ~40 MB but Cloudflare-protected)
-            - `BUNDLE_DENO=${{ env.BUNDLE_DENO }}` (1 = deno bundled — **required by yt-dlp** for JS-based extractors)
-            - `STRIP_BINARIES=${{ env.STRIP_BINARIES }}` (1 = strip ELF binaries)
-            - `REMOVE_PDB=${{ env.REMOVE_PDB }}` (1 = remove .pdb/.dbg/.xml debug files)
-            - `SKIP_FFPLAY=${{ env.SKIP_FFPLAY }}` (1 = skip ffplay — Parabolic doesn't use it)
-            - `SHRINK_ICU=${{ env.SHRINK_ICU }}` (0 = keep ICU, safe for non-English locales)
-
-            ### About deno
-            deno is bundled by default because **yt-dlp requires it** for sites that need
-            JavaScript rendering (e.g., Bilibili, Niconico, some YouTube age-restricted videos,
-            and various other platforms). If you're sure you only download from sites that
-            don't need JS extractors, you can re-run the workflow with `bundle_deno=false`
-            to get a ~92 MB smaller AppImage.
-
-            ### How to switch ffmpeg source
-            - **johnvansickle** (default, stable, ~40 MB): use the dropdown in the workflow dispatch UI.
-            - **btbn** (master-latest, ~140 MB): use the dropdown — only needed for bleeding-edge ffmpeg filters.
-
-            ### Installation
-            ```bash
-            chmod +x ${{ steps.discover.outputs.name }}
-            ./${{ steps.discover.outputs.name }}
-            ```
