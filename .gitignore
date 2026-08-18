@@ -406,3 +406,6 @@ FodyWeavers.xsd
 
 # macOS
 .DS_Store
+
+# Local session handoff notes (not part of the repo)
+SESSION-HANDOFF.md

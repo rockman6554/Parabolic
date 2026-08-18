@@ -633,6 +633,81 @@ export VERBOSE=1
 ok "AppImage generated at: $APPIMAGE_OUT"
 
 # -----------------------------------------------------------------------------
+#  Step 7.4 — Post-linuxdeploy RUNTIME FIX (always runs)
+# -----------------------------------------------------------------------------
+# CRITICAL: linuxdeploy's gtk plugin wraps the AppRun found in the AppDir at
+# build time: it renames the pre-existing `AppRun` to `AppRun.wrapped` and
+# generates a fresh `AppRun` in front of it. If the pre-existing AppRun was a
+# linuxdeploy-generated template that itself does `exec AppRun.wrapped`, the
+# result is a self-recursive AppRun.wrapped that spins forever WITHOUT EVER
+# launching the app — the classic "AppImage silently hangs at launch" symptom.
+#
+# The repo's packaging/appimage/AppRun is a real launcher (sets LD_LIBRARY_PATH,
+# PATH, XDG_DATA_DIRS, GDK_PIXBUF_MODULE_FILE, then execs the app). To be safe
+# against linuxdeploy generating a broken wrapper, we ALWAYS extract the built
+# AppImage here, verify/rewrite AppRun.wrapped, harden the gtk hook, and
+# repackage. This runs regardless of the strip/pdb/shrink knobs below.
+info "Step 7.4 — Verifying & hardening AppRun entry chain (always runs)..."
+EXTRACT_DIR="${WORK_DIR}/AppDir-stripped"
+rm -rf "$EXTRACT_DIR"
+"$APPIMAGE_OUT" --appimage-extract >/dev/null 2>&1
+mv squashfs-root "$EXTRACT_DIR"
+
+# 1. Ensure AppRun.wrapped is the REAL launcher, never a self-recursive template.
+#    If it execs itself (or matches a linuxdeploy-generated stub), overwrite it
+#    with our launcher from the repo.
+APPIMAGE_APPRUN_SRC="$SCRIPT_DIR/AppRun"
+if [[ -f "$APPIMAGE_APPRUN_SRC" ]]; then
+    if grep -qs 'exec.*AppRun.wrapped' "$EXTRACT_DIR/AppRun.wrapped" 2>/dev/null; then
+        warn "  AppRun.wrapped was a self-recursive linuxdeploy stub — replacing with real launcher."
+        cp "$APPIMAGE_APPRUN_SRC" "$EXTRACT_DIR/AppRun.wrapped"
+        chmod +x "$EXTRACT_DIR/AppRun.wrapped"
+    else
+        ok "  AppRun.wrapped is already the real launcher (no change)."
+    fi
+fi
+
+# 2. Harden the linuxdeploy gtk hook: fix hardcoded build-env paths, stop forcing
+#    GDK_BACKEND=x11, and avoid the a11y-bus hang.
+HOOK_FILE="$EXTRACT_DIR/apprun-hooks/linuxdeploy-plugin-gtk.sh"
+if [[ -f "$HOOK_FILE" ]]; then
+    # GSETTINGS_SCHEMA_DIR / GI_TYPELIB_PATH: replace any build-env absolute path
+    # (e.g. /home/user/.../mamba/...) with $APPDIR-relative paths.
+    sed -i 's|"$APPDIR//[^"]*glib-2.0/schemas"|"$APPDIR/usr/share/glib-2.0/schemas"|g' "$HOOK_FILE"
+    sed -i 's|"$APPDIR//[^"]*girepository-1.0"|"$APPDIR/usr/lib/girepository-1.0"|g' "$HOOK_FILE"
+    sed -i 's|^export GSETTINGS_SCHEMA_DIR=.*|export GSETTINGS_SCHEMA_DIR="$APPDIR/usr/share/glib-2.0/schemas"|' "$HOOK_FILE"
+    sed -i 's|^export GI_TYPELIB_PATH=.*|export GI_TYPELIB_PATH="$APPDIR/usr/lib/girepository-1.0"|' "$HOOK_FILE"
+    # GDK_BACKEND: never force x11; auto-detect (user override wins).
+    sed -i 's|^export GDK_BACKEND=.*|export GDK_BACKEND="${GDK_BACKEND:-}"|' "$HOOK_FILE"
+    # Append a11y/session-bus hardening if not already present.
+    if ! grep -qs 'GTK_A11Y' "$HOOK_FILE"; then
+        printf '\nexport GTK_A11Y="${GTK_A11Y:-none}"\nexport NO_AT_BRIDGE=1\nexport DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-}"\n' >> "$HOOK_FILE"
+    fi
+    ok "  AppRun hook hardened (GSETTINGS/GI_TYPELIB/GDK_BACKEND/GTK_A11Y)."
+fi
+
+# 3. Bundle a dbus-launch shim — modern distros removed dbus-launch, and the
+#    bundled libadwaita may exec it to acquire a session bus.
+if [[ ! -e "$EXTRACT_DIR/usr/bin/dbus-launch" ]]; then
+    mkdir -p "$EXTRACT_DIR/usr/bin"
+    cat > "$EXTRACT_DIR/usr/bin/dbus-launch" <<'DBUS_SHIM'
+#!/bin/sh
+# dbus-launch shim — exit 0, emitting the running session bus if available.
+if [ -n "$DBUS_SESSION_BUS_ADDRESS" ]; then
+    exit 0
+fi
+UID_NUM="$(id -u 2>/dev/null)"
+if [ -n "$UID_NUM" ] && [ -S "/run/user/$UID_NUM/bus" ]; then
+    echo "unix:path=/run/user/$UID_NUM/bus"
+    exit 0
+fi
+exit 0
+DBUS_SHIM
+    chmod +x "$EXTRACT_DIR/usr/bin/dbus-launch"
+    ok "  Bundled dbus-launch shim."
+fi
+
+# -----------------------------------------------------------------------------
 #  Step 7.5 — Post-linuxdeploy size reduction (strip + clean debug files)
 # -----------------------------------------------------------------------------
 # linuxdeploy runs BEFORE we have a chance to strip the bundled deps we copied
@@ -641,11 +716,6 @@ ok "AppImage generated at: $APPIMAGE_OUT"
 # This typically saves 20-40 MB on top of linuxdeploy's own stripping.
 if [[ "$STRIP_BINARIES" == "1" || "$REMOVE_PDB" == "1" || "$SHRINK_ICU" == "1" ]]; then
     info "Applying post-build size optimizations..."
-    EXTRACT_DIR="${WORK_DIR}/AppDir-stripped"
-    rm -rf "$EXTRACT_DIR"
-    "$APPIMAGE_OUT" --appimage-extract >/dev/null 2>&1
-    mv squashfs-root "$EXTRACT_DIR"
-
     before_size=$(stat -c%s "$APPIMAGE_OUT")
 
     # 1. Strip all ELF binaries we bundled (linuxdeploy already stripped its own deployed libs,
@@ -680,36 +750,41 @@ if [[ "$STRIP_BINARIES" == "1" || "$REMOVE_PDB" == "1" || "$SHRINK_ICU" == "1" ]
     # 4. Remove the .NET runtime's localization resource DLLs we don't ship
     #    (already trimmed by --self-contained, but some auxiliary .xml/.json files remain)
     rm -f "$EXTRACT_DIR"/usr/lib/org.nickvision.tubeconverter/*.json
+fi
 
-    # Repackage the AppImage from the stripped AppDir
-    info "  Repackaging AppImage..."
-    rm -f "$APPIMAGE_OUT"
-    if [[ -x "$DEPS_DIR/appimagetool" ]]; then
-        # Use appimagetool directly if we have it (faster than re-running linuxdeploy)
-        export APPIMAGE_EXTRACT_AND_RUN=1
-        "$DEPS_DIR/appimagetool" --appimage-extract-and-run "$EXTRACT_DIR" "$APPIMAGE_OUT" >/dev/null 2>&1 || {
-            warn "  appimagetool failed, falling back to linuxdeploy for repackaging..."
-            "$DEPS_DIR/linuxdeploy" --appdir "$EXTRACT_DIR" --output appimage \
-                --desktop-file "$EXTRACT_DIR/usr/share/applications/$APP_ID.desktop" \
-                --icon-file "$EXTRACT_DIR/usr/share/icons/hicolor/scalable/apps/$APP_ID.svg" >/dev/null 2>&1 || true
-        }
-    else
-        # Fall back to linuxdeploy (re-runs dep analysis but skips already-bundled libs)
+# Repackage the AppImage from the (possibly modified) AppDir — ALWAYS runs so the
+# Step 7.4 runtime fixes actually land in the final artifact.
+info "  Repackaging AppImage with hardened AppRun..."
+rm -f "$APPIMAGE_OUT"
+if [[ -x "$DEPS_DIR/appimagetool" ]]; then
+    # Use appimagetool directly if we have it (faster than re-running linuxdeploy)
+    export APPIMAGE_EXTRACT_AND_RUN=1
+    "$DEPS_DIR/appimagetool" --appimage-extract-and-run "$EXTRACT_DIR" "$APPIMAGE_OUT" >/dev/null 2>&1 || {
+        warn "  appimagetool failed, falling back to linuxdeploy for repackaging..."
         "$DEPS_DIR/linuxdeploy" --appdir "$EXTRACT_DIR" --output appimage \
             --desktop-file "$EXTRACT_DIR/usr/share/applications/$APP_ID.desktop" \
             --icon-file "$EXTRACT_DIR/usr/share/icons/hicolor/scalable/apps/$APP_ID.svg" >/dev/null 2>&1 || true
-    fi
+    }
+else
+    # Fall back to linuxdeploy (re-runs dep analysis but skips already-bundled libs)
+    "$DEPS_DIR/linuxdeploy" --appdir "$EXTRACT_DIR" --output appimage \
+        --desktop-file "$EXTRACT_DIR/usr/share/applications/$APP_ID.desktop" \
+        --icon-file "$EXTRACT_DIR/usr/share/icons/hicolor/scalable/apps/$APP_ID.svg" >/dev/null 2>&1 || true
+fi
 
-    after_size=$(stat -c%s "$APPIMAGE_OUT" 2>/dev/null || echo 0)
-    if [[ "$after_size" -gt 0 ]]; then
+after_size=$(stat -c%s "$APPIMAGE_OUT" 2>/dev/null || echo 0)
+if [[ "$after_size" -gt 0 ]]; then
+    if [[ "$STRIP_BINARIES" == "1" || "$REMOVE_PDB" == "1" || "$SHRINK_ICU" == "1" ]]; then
         saved=$(( (before_size - after_size) / 1024 / 1024 ))
         ok "Size optimization complete: saved ~${saved} MB (before: $((before_size/1024/1024)) MB, after: $((after_size/1024/1024)) MB)"
     else
-        warn "Repackaging may have failed; keeping the unstripped AppImage"
+        ok "Repackaged AppImage with hardened AppRun ($((after_size/1024/1024)) MB)."
     fi
-
-    rm -rf "$EXTRACT_DIR"
+else
+    warn "Repackaging may have failed; keeping the original AppImage"
 fi
+
+rm -rf "$EXTRACT_DIR"
 
 # -----------------------------------------------------------------------------
 #  Step 8 — Rename to include version
