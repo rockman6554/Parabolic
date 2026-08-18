@@ -152,6 +152,16 @@ fi
 PARABOLIC_VERSION="$(grep -oP '(?<=<Version>)[^<]+' "$SRC_DIR/Nickvision.Parabolic.Shared/Nickvision.Parabolic.Shared.csproj" 2>/dev/null | head -n1 || true)"
 [[ -z "$PARABOLIC_VERSION" ]] && PARABOLIC_VERSION="$(grep -oP '(?<=version=")[^"]+' "$SRC_DIR/resources/linux/org.nickvision.tubeconverter.metainfo.xml" 2>/dev/null | head -n1 || true)"
 [[ -z "$PARABOLIC_VERSION" ]] && PARABOLIC_VERSION="$(date +%Y.%m.%d)-git"
+# Allow the CI tag to override the version: the AppImage filename AND embedded
+# version.txt must match the GitHub Release tag that built it, because the bundled
+# updater compares version.txt against the release's tag_name (with leading "v"
+# and "appimage-" stripped). Without this, a tag like v2026.5.1 would produce a
+# Parabolic-2026.5.0 AppImage that the updater would perpetually claim is outdated.
+if [[ -n "${PARABOLIC_VERSION_OVERRIDE:-}" ]]; then
+    PARABOLIC_VERSION="${PARABOLIC_VERSION_OVERRIDE#v}"
+    PARABOLIC_VERSION="${PARABOLIC_VERSION#appimage-}"
+    ok "Using tag version override: $PARABOLIC_VERSION"
+fi
 ok "Parabolic version: $PARABOLIC_VERSION"
 
 # -----------------------------------------------------------------------------

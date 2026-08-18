@@ -86,6 +86,10 @@ env:
   ARCH: x86_64
   DOTNET_RID: linux-x64
   PARABOLIC_REF: ${{ inputs.parabolic_ref || 'main' }}
+  # When building from a tag, name the AppImage after that tag (so the .AppImage
+  # filename and the Release match). Empty on branch pushes/dispatches → the
+  # script falls back to the upstream source version.
+  PARABOLIC_VERSION_OVERRIDE: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
   # GitHub owner/repo where releases will be published — baked into the bundled
   # parabolic-updater.sh so it knows where to check for updates.
   # `${{ github.repository_owner }}` resolves to YOUR username (the fork owner),
