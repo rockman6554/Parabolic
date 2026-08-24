@@ -2,7 +2,7 @@
 
 ![](resources/banner.png)
 
-# Parabolic
+# Parabolic - Portable version
 
 ### *A GUI for yt-dlp*
 
