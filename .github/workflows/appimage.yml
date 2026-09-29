@@ -41,11 +41,12 @@ on:
         default: "main"
         type: string
       ffmpeg_source:
-        description: "ffmpeg source — btbn (~140 MB, GitHub Releases, reliable — DEFAULT) or johnvansickle (~40 MB, but Cloudflare-protected, auto-falls-back to btbn on failure)"
+        description: "ffmpeg source — lgpl-7.1 (~80 MB, BtbN stable 7.1 LGPL, no Cloudflare — DEFAULT) or btbn (~140 MB, master-latest GPL) or johnvansickle (~40 MB but Cloudflare-protected)"
         required: false
-        default: "btbn"
+        default: "lgpl-7.1"
         type: choice
         options:
+          - lgpl-7.1
           - btbn
           - johnvansickle
   push:
@@ -103,10 +104,11 @@ env:
   STRIP_BINARIES: "1"
   REMOVE_PDB: "1"
   SKIP_FFPLAY: "1"
-  SHRINK_ICU: "0"
+  SHRINK_ICU: "1"
+  UPX_BINARIES: "1"  # compress bundled ELF executables with UPX --ultra-brute --lzma
   # ffmpeg source — "btbn" (DEFAULT, GitHub Releases, ~140 MB, reliable)
   # or "johnvansickle" (~40 MB, but Cloudflare-protected — auto-falls-back to btbn if it fails)
-  FFMPEG_SOURCE: ${{ inputs.ffmpeg_source || 'btbn' }}
+  FFMPEG_SOURCE: ${{ inputs.ffmpeg_source || 'lgpl-7.1' }}
   DOTNET_CLI_TELEMETRY_OPTOUT: "1"
   DOTNET_NOLOGO: "1"
   DOTNET_SKIP_FIRST_TIME_EXPERIENCE: "1"
@@ -206,6 +208,7 @@ jobs:
                   libcairo2-dev \
                   libfribidi-dev libharfbuzz-dev libfreetype-dev libfontconfig1-dev \
                   libpixman-1-dev libffi-dev libpcre2-dev \
+                  upx-ucl \
                   binutils file \
                   git curl wget unzip tar; then
               echo "✔ apt-get install succeeded on attempt $attempt"

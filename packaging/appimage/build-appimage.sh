@@ -209,6 +209,17 @@ if [[ "$SKIP_DOWNLOAD" != "1" ]]; then
     #     and fall back to BtbN if not.
     FFMPEG_SOURCE="${FFMPEG_SOURCE:-btbn}"
     case "$FFMPEG_SOURCE" in
+        lgpl-7.1|lgpl)
+            # BtbN stable 7.1.x LGPL — ~80 MB, no Cloudflare, no GPL codecs.
+            # Parabolic downloads original streams without re-encoding, so
+            # the missing GPL encoders (x264, x265, libfdk_aac) are not needed.
+            download_dep "ffmpeg-n7.1-latest-${FF_ARCH}-lgpl.tar.xz" \
+                "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n7.1-latest-${FF_ARCH}-lgpl.tar.xz" \
+                "$DEPS_DIR/ffmpeg.tar.xz"
+            mkdir -p "$DEPS_DIR/ffmpeg"
+            tar -xf "$DEPS_DIR/ffmpeg.tar.xz" -C "$DEPS_DIR/ffmpeg" --strip-components=2
+            ok "Using BtbN n7.1 LGPL ffmpeg (~80 MB, no Cloudflare)"
+            ;;
         btbn)
             download_dep "ffmpeg-master-latest-${FF_ARCH}-gpl.tar.xz" \
                 "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-${FF_ARCH}-gpl.tar.xz" \
@@ -724,7 +735,7 @@ fi
 # ourselves (yt-dlp, ffmpeg, aria2c, deno). To get those stripped too, we
 # extract the just-built AppImage, strip its binaries, and repackage it.
 # This typically saves 20-40 MB on top of linuxdeploy's own stripping.
-if [[ "$STRIP_BINARIES" == "1" || "$REMOVE_PDB" == "1" || "$SHRINK_ICU" == "1" ]]; then
+if [[ "$STRIP_BINARIES" == "1" || "$REMOVE_PDB" == "1" || "$SHRINK_ICU" == "1" || "${UPX_BINARIES:-0}" == "1" ]]; then
     info "Applying post-build size optimizations..."
     before_size=$(stat -c%s "$APPIMAGE_OUT")
 
@@ -734,6 +745,31 @@ if [[ "$STRIP_BINARIES" == "1" || "$REMOVE_PDB" == "1" || "$SHRINK_ICU" == "1" ]
         info "  Stripping ELF binaries..."
         find "$EXTRACT_DIR/usr/bin" "$EXTRACT_DIR/usr/lib" \
              -type f -exec sh -c 'file "$1" | grep -q "ELF.*not stripped" && strip --strip-all "$1" 2>/dev/null || true' _ {} \;
+    fi
+
+    # 1b. UPX-compress bundled ELF executables (saves ~20-40 MB on ffmpeg/aria2c/deno).
+    #     DO NOT UPX:
+    #       - shared libraries (*.so*) — UPX breaks the dynamic linker's mmap-based loading
+    #       - .NET assemblies (*.dll) — these are PE/COFF, not ELF
+    #       - the .NET host binary (Nickvision.Parabolic.GNOME) — UPX can break its bootstrap
+    #       - yt-dlp (Python zipapp, not ELF — UPX would refuse it anyway)
+    if [[ "${UPX_BINARIES:-0}" == "1" ]] && command -v upx >/dev/null 2>&1; then
+        info "  UPX-compressing ELF executables..."
+        upx_count=0
+        while IFS= read -r -d '' f; do
+            bname="$(basename "$f")"
+            case "$bname" in
+                *.so|*.so.*|*.dll|*.node|*.pyc) continue ;;
+                Nickvision.Parabolic.GNOME|Nickvision.Parabolic.GNOME.dbg) continue ;;
+                yt-dlp) continue ;;
+            esac
+            if file "$f" 2>/dev/null | grep -q "ELF.*executable"; then
+                upx --ultra-brute --lzma "$f" 2>/dev/null && upx_count=$((upx_count + 1)) || true
+            fi
+        done < <(find "$EXTRACT_DIR/usr/bin" "$EXTRACT_DIR/usr/lib" -type f -executable -print0 2>/dev/null)
+        ok "  UPX compressed $upx_count ELF binaries."
+    elif [[ "${UPX_BINARIES:-0}" == "1" ]]; then
+        warn "  UPX_BINARIES=1 but upx not found on PATH — skipping UPX compression."
     fi
 
     # 2. Remove .pdb (Windows PDB), .dbg (GNU debug info), and .xml (XML doc) files
