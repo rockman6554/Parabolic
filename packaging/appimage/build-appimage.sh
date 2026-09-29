@@ -766,7 +766,7 @@ if [[ "$STRIP_BINARIES" == "1" || "$REMOVE_PDB" == "1" || "$SHRINK_ICU" == "1" |
                 yt-dlp) continue ;;
             esac
             if file "$f" 2>/dev/null | grep -q "ELF.*executable"; then
-                upx --ultra-brute --lzma "$f" 2>/dev/null && upx_count=$((upx_count + 1)) || true
+                upx -9 --lzma "$f" 2>/dev/null && upx_count=$((upx_count + 1)) || true
             fi
         done < <(find "$EXTRACT_DIR/usr/bin" "$EXTRACT_DIR/usr/lib" -type f -executable -print0 2>/dev/null)
         ok "  UPX compressed $upx_count ELF binaries."
