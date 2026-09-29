@@ -210,15 +210,17 @@ if [[ "$SKIP_DOWNLOAD" != "1" ]]; then
     FFMPEG_SOURCE="${FFMPEG_SOURCE:-btbn}"
     case "$FFMPEG_SOURCE" in
         lgpl-7.1|lgpl)
-            # BtbN stable 7.1.x LGPL — ~80 MB, no Cloudflare, no GPL codecs.
+            # BtbN master-latest LGPL — ~139 MB raw, no Cloudflare, no GPL
+            # codecs. BtbN does NOT publish release-tagged (n7.x) builds,
+            # only master-latest. Verified URL on 2026-09-29.
             # Parabolic downloads original streams without re-encoding, so
             # the missing GPL encoders (x264, x265, libfdk_aac) are not needed.
-            download_dep "ffmpeg-n7.1-latest-${FF_ARCH}-lgpl.tar.xz" \
-                "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n7.1-latest-${FF_ARCH}-lgpl.tar.xz" \
+            download_dep "ffmpeg-master-latest-${FF_ARCH}-lgpl.tar.xz" \
+                "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-${FF_ARCH}-lgpl.tar.xz" \
                 "$DEPS_DIR/ffmpeg.tar.xz"
             mkdir -p "$DEPS_DIR/ffmpeg"
             tar -xf "$DEPS_DIR/ffmpeg.tar.xz" -C "$DEPS_DIR/ffmpeg" --strip-components=2
-            ok "Using BtbN n7.1 LGPL ffmpeg (~80 MB, no Cloudflare)"
+            ok "Using BtbN master-latest LGPL ffmpeg (~139 MB raw, no Cloudflare)"
             ;;
         btbn)
             download_dep "ffmpeg-master-latest-${FF_ARCH}-gpl.tar.xz" \
